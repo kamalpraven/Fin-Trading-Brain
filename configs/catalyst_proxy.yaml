@@ -1,0 +1,14 @@
+name: catalyst_proxy_v1
+symbols: [META, TSLA, NVDA, AMD, GOOGL, AMZN]
+entry:
+  type: large_move
+  min_daily_return: 0.02
+exit:
+  reverse_day: true
+  max_hold_days: 2
+  stop_loss_pct: 0.04
+sizing:
+  fraction_per_trade: 0.20
+execution:
+  slippage_bps: 5
+  fill: next_open

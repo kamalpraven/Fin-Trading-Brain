@@ -1,0 +1,10 @@
+alpaca-py>=0.42
+pandas>=2.2
+numpy>=2.0
+pyarrow>=18
+scipy>=1.14
+scikit-learn>=1.6
+matplotlib>=3.9
+PyYAML>=6.0
+python-dotenv>=1.0
+pytest>=8.3

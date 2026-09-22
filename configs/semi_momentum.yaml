@@ -1,0 +1,14 @@
+name: semi_momentum_v1
+symbols: [NVDA, AMD, AVGO, AMAT, MU]
+entry:
+  type: momentum
+  lookback_days: 2
+exit:
+  reverse_day: true
+  max_hold_days: 3
+  stop_loss_pct: 0.04
+sizing:
+  fraction_per_trade: 0.20
+execution:
+  slippage_bps: 5
+  fill: next_open

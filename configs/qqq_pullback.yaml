@@ -1,0 +1,15 @@
+name: qqq_pullback_v1
+symbols: [QQQ]
+entry:
+  type: pullback
+  trend_lookback_days: 5
+  require_down_day: true
+exit:
+  rebound_day: true
+  max_hold_days: 3
+  stop_loss_pct: 0.03
+sizing:
+  fraction_per_trade: 0.25
+execution:
+  slippage_bps: 5
+  fill: next_open
