@@ -7,5 +7,8 @@ data/*.parquet
 results/*.csv
 results/*.json
 results/*.png
+results/**/*.csv
+results/**/*.json
+results/**/*.png
 !data/.gitkeep
 !results/.gitkeep

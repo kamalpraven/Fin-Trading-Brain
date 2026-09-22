@@ -9,6 +9,7 @@ exit:
   stop_loss_pct: 0.04
 sizing:
   fraction_per_trade: 0.20
+  max_positions: 4
 execution:
   slippage_bps: 5
   fill: next_open
