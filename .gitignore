@@ -12,3 +12,5 @@ results/**/*.json
 results/**/*.png
 !data/.gitkeep
 !results/.gitkeep
+!results/validation/
+!results/validation/schema.json

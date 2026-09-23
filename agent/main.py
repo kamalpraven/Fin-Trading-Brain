@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from uuid import uuid4
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,11 @@ class ResearchAgent:
         self.strands_agent = None
         try:
             from strands import Agent  # type: ignore
-            self.strands_agent = Agent(system_prompt=SYSTEM_PROMPT)
+            cfg = load_agent_config()
+            kwargs = {"system_prompt": SYSTEM_PROMPT}
+            if cfg.strands_model_id:
+                kwargs["model"] = cfg.strands_model_id
+            self.strands_agent = Agent(**kwargs)
             self.integration_status["strands"] = {"available": True, "mode": "strands"}
         except Exception as exc:
             self.integration_status["strands"] = {"available": False, "mode": "local_fallback", "reason": str(exc)}
@@ -100,6 +105,45 @@ def _candidate_actions(rankings: dict[str, Any], regime: dict[str, Any], symbol:
     return out
 
 
+def _extract_catalysts(evidence: list[dict[str, Any]], symbols: list[str]) -> dict[str, list[dict[str, Any]]]:
+    out = {s: [] for s in symbols}
+    for item in evidence:
+        sym = item.get("symbol")
+        if sym not in out or item.get("available") is False:
+            continue
+        text = " ".join([str(item.get("title") or ""), str(item.get("snippet") or "")]).strip()
+        out[sym].append({"catalyst": text[:240] or "External evidence item", "evidence": item.get("snippet"), "source": item.get("url"), "published_at": item.get("published_at"), "retrieved_at": item.get("retrieved_at"), "source_quality": item.get("source_quality")})
+    return {k: v[:3] for k, v in out.items()}
+
+
+def _detect_conflicts(evidence: list[dict[str, Any]], symbols: list[str]) -> dict[str, dict[str, list[str]]]:
+    pos_words = ["demand", "growth", "beat", "raise", "expansion", "strong", "ai", "hbm"]
+    neg_words = ["weak", "cut", "miss", "lower", "guidance", "delay", "ban", "export", "decline"]
+    out: dict[str, dict[str, list[str]]] = {}
+    for sym in symbols:
+        pos: list[str] = []; neg: list[str] = []
+        for item in evidence:
+            if item.get("symbol") != sym or item.get("available") is False: continue
+            text = " ".join([str(item.get("title") or ""), str(item.get("snippet") or "")]).lower()
+            title = str(item.get("title") or item.get("url"))[:180]
+            if any(w in text for w in pos_words): pos.append(title)
+            if any(w in text for w in neg_words): neg.append(title)
+        if pos or neg:
+            out[sym] = {"positive": pos[:3], "negative": neg[:3]}
+    return out
+
+
+def _strands_synthesis(agent: ResearchAgent, facts: dict[str, Any]) -> str | None:
+    if not agent.strands_agent:
+        return None
+    prompt = "Synthesize only from these tool-provided facts. Do not add quantitative facts. Research-only, no orders.\n" + json.dumps(facts, default=str)[:12000]
+    try:
+        return str(agent.strands_agent(prompt))
+    except Exception as exc:
+        agent.integration_status["strands"] = {"available": False, "mode": "local_fallback", "reason": str(exc)}
+        return None
+
+
 def _synthesis(query: str, regime: dict[str, Any], rankings: dict[str, Any], evidence: list[dict[str, Any]], memory: list[dict[str, Any]]) -> str:
     allowed = regime.get("risk_control", {}).get("new_entries_allowed")
     gate = "allows" if allowed else "blocks"
@@ -125,6 +169,13 @@ def build_research_brief(query: str, agent: ResearchAgent | None = None) -> Rese
     evidence = _external_evidence(query, target_symbols)
     memory = _memory_context(query, symbol)
     actions = _candidate_actions(rankings, regime, symbol)
+    top_symbols = [r.get("symbol") for r in rankings.get("symbols", [])[:5] if r.get("symbol")]
+    catalysts = _extract_catalysts(evidence, top_symbols)
+    conflicts = _detect_conflicts(evidence, top_symbols)
+    facts = {"query": query, "regime": regime, "rankings": rankings, "evidence": evidence[:10], "memory": memory[:5], "catalysts": catalysts, "conflicts": conflicts}
+    synthesis = _strands_synthesis(agent, facts) or _synthesis(query, regime, rankings, evidence, memory)
+    quant_as_of = rankings.get("as_of") or regime.get("qqq", {}).get("as_of")
+    external_retrieved = [x.get("retrieved_at") for x in evidence if x.get("retrieved_at")]
     brief = ResearchBrief(
         timestamp=datetime.now(timezone.utc).isoformat(),
         query=query,
@@ -135,16 +186,53 @@ def build_research_brief(query: str, agent: ResearchAgent | None = None) -> Rese
         memory_context=memory,
         risk={"primary_rule": "qqq_sma50_gate", "no_trading": True, "notes": ["Semiconductor sector concentration", "Strategy remains cost-sensitive", "News is contextual only"]},
         candidate_actions=actions,
-        synthesis=_synthesis(query, regime, rankings, evidence, memory),
-        limitations=["Research-only; no order execution tools exist", "Bright Data/Cognee may be unavailable if credentials are not configured", "Web evidence is not a direct trading signal"],
+        synthesis=synthesis,
+        catalysts=catalysts,
+        conflicts=conflicts,
+        data_freshness={"quant_data_as_of": quant_as_of, "quant_data_status": "historical/cached Alpha Lab data", "external_research_retrieved_at": max(external_retrieved) if external_retrieved else None, "external_research_status": "current live web retrieval when Bright Data available; otherwise unavailable", "memory_status": "prior research recalled from Cognee when available"},
+        limitations=["Research-only; no order execution tools exist", "Bright Data/Cognee may be unavailable if credentials are not configured", "Web evidence is not a direct trading signal", "Quant rankings are historical/cached unless data artifacts are refreshed"],
         integration_status=agent.integration_status,
     )
     return brief
 
 
+def _daily_recommendation_state(actions: list[dict[str, Any]]) -> str:
+    statuses = {str(a.get("status", "")).lower() for a in actions}
+    if "blocked_by_regime" in statuses:
+        return "BLOCKED"
+    if "candidate" in statuses:
+        return "CANDIDATE"
+    return "WATCH"
+
+
+def _source_list(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    seen = set()
+    for item in evidence:
+        url = item.get("url")
+        if not url or url in seen or item.get("available") is False:
+            continue
+        seen.add(url)
+        out.append({"title": item.get("title"), "url": url, "source": item.get("source"), "published_at": item.get("published_at"), "retrieved_at": item.get("retrieved_at")})
+    return out
+
+
 def run_research_agent(query: str, agent: ResearchAgent | None = None, persist: bool = False, save: bool = False) -> dict[str, Any]:
     brief = build_research_brief(query, agent)
     obj = brief.to_dict()
+    generated_at = datetime.now(timezone.utc).isoformat()
+    obj["brief_id"] = f"brief-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+    obj["generated_at"] = generated_at
+    obj["as_of"] = obj.get("data_freshness", {}).get("quant_data_as_of") or generated_at
+    obj["quant_state"] = obj.get("quantitative_state", {})
+    obj["regime_state"] = obj.get("market_regime", {})
+    obj["risk_state"] = obj.get("risk", {})
+    obj["candidates"] = obj.get("quantitative_candidates", [])
+    obj["recommendation_state"] = _daily_recommendation_state(obj.get("candidate_actions", []))
+    obj["sources"] = _source_list(obj.get("external_evidence", []))
+    obj["hypothesis"] = obj.get("synthesis", "")
+    obj["outcome"] = "research_only_no_trades"
+    obj["lessons"] = []
     if not validate_brief(obj):
         raise ValueError("research brief failed schema validation")
     if persist:
@@ -171,13 +259,14 @@ def save_brief(brief: dict[str, Any]) -> str:
 def format_brief(brief: dict[str, Any]) -> str:
     regime = brief.get("market_regime", {}).get("risk_control", {})
     qqq = brief.get("market_regime", {}).get("qqq", {})
-    lines = ["SEMICONDUCTOR RESEARCH BRIEF", "", "REGIME"]
+    fresh = brief.get("data_freshness", {})
+    lines = ["FIN TRADING BRAIN", "", "AS OF", f"Quant data: {fresh.get('quant_data_as_of')} ({fresh.get('quant_data_status')})", f"External research retrieved: {fresh.get('external_research_retrieved_at')}", "", "MARKET REGIME"]
     lines.append(f"QQQ > SMA50: {qqq.get('qqq_above_sma50')}")
     lines.append(f"New entries: {'allowed' if regime.get('new_entries_allowed') else 'blocked'}")
     lines += ["", "QUANTITATIVE RANKING"]
     for r in brief.get("quantitative_candidates", [])[:5]:
         lines.append(f"{r.get('rank')}. {r.get('symbol')} - {r.get('signal')}")
-    lines += ["", "CURRENT EVIDENCE"]
+    lines += ["", "CURRENT CATALYSTS / EVIDENCE"]
     ev = brief.get("external_evidence", [])
     if ev and ev[0].get("available", True) is False:
         lines.append(f"Unavailable: {ev[0].get('reason')}")
@@ -187,7 +276,12 @@ def format_brief(brief: dict[str, Any]) -> str:
     lines += ["", "MEMORY"]
     mem = brief.get("memory_context", [])
     lines.append("Unavailable: " + str(mem[0].get("reason")) if mem and mem[0].get("available") is False else f"{len(mem)} memory items")
-    lines += ["", "RISK"]
+    if brief.get("conflicts"):
+        lines += ["", "CONFLICTS"]
+        for sym, c in brief.get("conflicts", {}).items():
+            if c.get("positive") and c.get("negative"):
+                lines.append(f"{sym}: positive={len(c.get('positive', []))}, negative={len(c.get('negative', []))}")
+    lines += ["", "SYSTEM RISK"]
     for n in brief.get("risk", {}).get("notes", []):
         lines.append(f"- {n}")
     lines += ["", "RESEARCH STATUS"]

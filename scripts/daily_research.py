@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 from agent.config import integration_status
 from agent.main import format_brief, run_daily_research
@@ -11,7 +13,8 @@ from agent.main import format_brief, run_daily_research
 def main():
     print("Integration status:")
     for k, v in integration_status().items():
-        print(f"  {k}: {'READY' if v.get('available') else 'UNAVAILABLE'}" + (f" ({v.get('reason')})" if v.get('reason') else ""))
+        state = "READY" if v.get("available") else v.get("status", "DEGRADED")
+        print(f"  {k}: {state}" + (f" ({v.get('reason')})" if v.get("reason") else ""))
     brief = run_daily_research(persist=True, save=True)
     print(format_brief(brief))
     print(f"Saved: {brief.get('artifact_path')}")

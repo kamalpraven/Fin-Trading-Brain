@@ -1,0 +1,25 @@
+{
+  "description": "Schema for future local Alpha Lab vs QuantConnect/LEAN validation comparisons. No results are claimed by this placeholder.",
+  "type": "object",
+  "required": ["run_id", "created_at", "local_artifact", "lean_artifact", "universe", "checks"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "local_artifact": {"type": "string"},
+    "lean_artifact": {"type": "string"},
+    "universe": {"type": "array", "items": {"type": "string"}},
+    "checks": {
+      "type": "object",
+      "properties": {
+        "signal_date_alignment": {"type": "string"},
+        "next_session_execution": {"type": "string"},
+        "duplicate_order_check": {"type": "string"},
+        "qqq_sma50_gate_match": {"type": "string"},
+        "slippage_bps": {"type": "number"},
+        "metric_tolerances": {"type": "object"}
+      }
+    },
+    "differences": {"type": "array", "items": {"type": "object"}},
+    "accepted": {"type": "boolean"}
+  }
+}
