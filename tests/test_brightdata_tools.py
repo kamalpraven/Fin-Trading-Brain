@@ -4,6 +4,7 @@ from agent.tools import brightdata_tools
 class Resp:
     status_code = 200
     text = "ok"
+    headers = {"content-type": "application/json"}
     def raise_for_status(self): pass
     def json(self):
         return {"results": [{"title": "T", "url": "https://example.com/a", "snippet": "S"}]}
@@ -44,4 +45,4 @@ def test_brightdata_malformed_result_handling(monkeypatch):
     monkeypatch.setenv("BRIGHTDATA_MCP_URL", "https://brightdata.test/search")
     monkeypatch.setattr(brightdata_tools.requests, "post", lambda *a, **k: Bad())
     out = brightdata_tools.search_web("NVDA")
-    assert out["available"] and out["results"] == []
+    assert out["available"] is False and out["results"] == []

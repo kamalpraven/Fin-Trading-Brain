@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse, unquote
 import json
+import os
 import time
 
 import requests
@@ -11,14 +13,20 @@ import requests
 from agent.config import load_agent_config
 
 TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
+AUTH_STATUS = {401, 403}
+LAST_GOOD_PATH = Path("results/agent/brightdata_last_good.json")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _unavailable(reason: str, **extra: Any) -> dict[str, Any]:
-    return {"available": False, "reason": reason, "results": [], **extra}
+def _diagnostic(status_code: int | None = None, content_type: str | None = None, byte_length: int | None = None, provider_error: str | None = None, retry_count: int = 0) -> dict[str, Any]:
+    return {"http_status": status_code, "content_type": content_type, "response_bytes": byte_length, "provider_error": provider_error, "retry_count": retry_count, "retrieved_at": utc_now()}
+
+
+def _unavailable(reason: str, status: str = "DEGRADED", diagnostic: dict[str, Any] | None = None, **extra: Any) -> dict[str, Any]:
+    return {"available": False, "status": status, "reason": reason, "results": [], "diagnostic": diagnostic or _diagnostic(), **extra}
 
 
 def canonical_url(url: str) -> str:
@@ -57,6 +65,7 @@ def _normalize(item: dict[str, Any]) -> dict[str, Any]:
         "source_quality": classify_source(str(url), source),
         "published_at": published,
         "retrieved_at": utc_now(),
+        "freshness_status": "fresh",
     }
 
 
@@ -105,7 +114,49 @@ def _nested_error(payload: Any) -> str | None:
 
 def _looks_blocked(text: str) -> bool:
     low = text.lower()
-    return "captcha" in low or "cloudflare" in low or "502 bad gateway" in low or "proxy error" in low
+    return "captcha" in low or "cloudflare" in low or "502 bad gateway" in low or "proxy error" in low or "unusual traffic" in low
+
+
+def _parse_response_payload(resp: Any, retry_count: int) -> tuple[Any | None, str | None, bool, dict[str, Any]]:
+    text = getattr(resp, "text", "") or ""
+    status_code = getattr(resp, "status_code", None)
+    content_type = ""
+    try:
+        content_type = resp.headers.get("content-type", "") if getattr(resp, "headers", None) else ""
+    except Exception:
+        content_type = ""
+    diag = _diagnostic(status_code=status_code, content_type=content_type, byte_length=len(text.encode("utf-8", errors="ignore")), retry_count=retry_count)
+    if not text.strip():
+        return None, "Bright Data empty response body", True, diag
+    if _looks_blocked(text):
+        return None, "Bright Data transient/blocking response (CAPTCHA/502/proxy)", True, diag
+    try:
+        data = resp.json()
+    except Exception:
+        preview = text[:120].lower()
+        if "<html" in preview or "<!doctype" in preview:
+            return None, "Bright Data returned HTML/text instead of JSON", True, diag
+        return None, "Bright Data malformed JSON response", True, diag
+    err = _nested_error(data)
+    diag["provider_error"] = err
+    if isinstance(data, dict) and isinstance(data.get("body"), str):
+        body = data["body"]
+        diag["response_bytes"] = len(body.encode("utf-8", errors="ignore"))
+        if not body.strip():
+            return None, "Bright Data empty nested response body", True, diag
+        if _looks_blocked(body):
+            return None, "Bright Data transient/blocking response (CAPTCHA/502/proxy)", True, diag
+        try:
+            body_data = json.loads(body)
+            if isinstance(body_data, (dict, list)):
+                data = body_data
+            else:
+                return None, "Bright Data unexpected nested JSON schema", False, diag
+        except Exception:
+            if "<html" in body[:160].lower() or "<!doctype" in body[:160].lower():
+                return None, "Bright Data nested body returned HTML/text instead of JSON", True, diag
+            return None, "Bright Data malformed JSON response body", True, diag
+    return data, None, False, diag
 
 
 def _direct_payload(query: str, max_results: int, news: bool) -> dict[str, Any]:
@@ -116,57 +167,97 @@ def _direct_payload(query: str, max_results: int, news: bool) -> dict[str, Any]:
     return {"zone": cfg.brightdata_serp_zone, "url": f"https://www.google.com/search?q={requests.utils.quote(search)}&num={max_results}", "format": "json"}
 
 
-def search_web(query: str, max_results: int = 5, timeout: float = 20.0, news: bool = False) -> dict[str, Any]:
+def search_web(query: str, max_results: int = 5, timeout: float = 20.0, news: bool = False, max_retries: int = 1) -> dict[str, Any]:
     cfg = load_agent_config()
     if not cfg.brightdata_configured:
-        return _unavailable("BRIGHTDATA credentials not configured")
+        return _unavailable("BRIGHTDATA credentials not configured", status="FAIL")
     use_direct = bool(cfg.brightdata_serp_zone)
     url = (cfg.brightdata_api_url if use_direct else cfg.brightdata_mcp_url) or "https://api.brightdata.com/request"
     headers = {"Authorization": f"Bearer {cfg.brightdata_api_key}", "Content-Type": "application/json"}
     payload = _direct_payload(query, max_results, news) if use_direct else {"query": query, "max_results": max_results, "news": news}
     last_reason = "unknown Bright Data failure"
-    for attempt in range(3):
+    last_diag = _diagnostic()
+    attempts = max(1, int(max_retries) + 1)
+    for attempt in range(attempts):
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
-            text = resp.text[:4000]
-            if resp.status_code in TRANSIENT_STATUS or _looks_blocked(text):
-                last_reason = "Bright Data transient/blocking response (CAPTCHA/502/proxy)" if _looks_blocked(text) else f"Bright Data HTTP {resp.status_code}"
-                if attempt < 2:
-                    time.sleep(0.5 * (attempt + 1)); continue
+            text = getattr(resp, "text", "") or ""
+            diag = _diagnostic(status_code=resp.status_code, content_type=resp.headers.get("content-type", "") if getattr(resp, "headers", None) else "", byte_length=len(text.encode("utf-8", errors="ignore")), retry_count=attempt)
+            last_diag = diag
+            if resp.status_code in AUTH_STATUS:
+                try: err = _nested_error(resp.json())
+                except Exception: err = None
+                diag["provider_error"] = err
+                return _unavailable(f"Bright Data auth/config HTTP {resp.status_code}: {err or 'request not authorized'}", status="FAIL", diagnostic=diag)
+            if resp.status_code in TRANSIENT_STATUS:
+                last_reason = f"Bright Data HTTP {resp.status_code}"
+                if attempt < attempts - 1:
+                    time.sleep(0.5); continue
+                return _unavailable(last_reason, diagnostic=diag)
             if resp.status_code >= 400:
                 try: err = _nested_error(resp.json())
-                except Exception: err = text[:300]
-                return _unavailable(f"Bright Data HTTP {resp.status_code}: {err or 'request failed'}")
-            try:
-                data = resp.json()
-            except Exception:
-                return _unavailable("Bright Data malformed JSON response")
-            if isinstance(data, dict) and isinstance(data.get("body"), str):
-                if _looks_blocked(data["body"]):
-                    return _unavailable("Bright Data transient/blocking response (CAPTCHA/502/proxy)")
-                try:
-                    body_data = json.loads(data["body"])
-                    if isinstance(body_data, dict):
-                        data = body_data
-                except Exception:
-                    return _unavailable("Bright Data malformed JSON response body")
+                except Exception: err = None
+                diag["provider_error"] = err
+                return _unavailable(f"Bright Data HTTP {resp.status_code}: {err or 'request failed'}", status="FAIL", diagnostic=diag)
+            data, parse_error, retryable, diag = _parse_response_payload(resp, attempt)
+            last_diag = diag
+            if parse_error:
+                last_reason = parse_error
+                if retryable and attempt < attempts - 1:
+                    time.sleep(0.5); continue
+                return _unavailable(parse_error, diagnostic=diag)
             err = _nested_error(data)
             if err and not _extract_results(data):
-                return _unavailable(f"Bright Data error: {err}")
+                diag["provider_error"] = err
+                return _unavailable(f"Bright Data error: {err}", status="FAIL" if "auth" in err.lower() else "DEGRADED", diagnostic=diag)
             results = deduplicate_results(_extract_results(data))[:max_results]
-            return {"available": True, "query": query, "news": news, "results": results, "retrieved_at": utc_now()}
+            if not results:
+                return _unavailable("Bright Data returned no usable sourced results", diagnostic=diag)
+            retrieved = utc_now()
+            return {"available": True, "status": "READY", "query": query, "news": news, "results": results, "retrieved_at": retrieved, "diagnostic": diag}
         except requests.Timeout:
             last_reason = "Bright Data request failed: timed out"
+            last_diag = _diagnostic(retry_count=attempt)
         except (requests.RequestException, TimeoutError) as exc:
             last_reason = f"Bright Data request failed: {exc}"
-        if attempt < 2:
-            time.sleep(0.5 * (attempt + 1))
-    return _unavailable(last_reason)
+            last_diag = _diagnostic(retry_count=attempt)
+        if attempt < attempts - 1:
+            time.sleep(0.5)
+    return _unavailable(last_reason, diagnostic=last_diag)
+
+
+def save_last_good_evidence(items: list[dict[str, Any]], query: str | None = None) -> None:
+    good = [x for x in items if isinstance(x, dict) and str(x.get("url", "")).startswith(("http://", "https://")) and x.get("freshness_status") == "fresh"]
+    if not good:
+        return
+    LAST_GOOD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LAST_GOOD_PATH.write_text(json.dumps({"saved_at": utc_now(), "query": query, "results": good}, indent=2, default=str), encoding="utf-8")
+
+
+def load_last_good_evidence() -> list[dict[str, Any]]:
+    try:
+        data = json.loads(LAST_GOOD_PATH.read_text(encoding="utf-8"))
+        results = data.get("results", []) if isinstance(data, dict) else []
+        return [x for x in results if isinstance(x, dict) and str(x.get("url", "")).startswith(("http://", "https://"))]
+    except Exception:
+        return []
+
+
+def mark_stale_fallback(items: list[dict[str, Any]], attempted_at: str, failure_reason: str) -> list[dict[str, Any]]:
+    out = []
+    for item in items:
+        x = dict(item)
+        x["freshness_status"] = "stale_fallback"
+        x["brightdata_attempted_at"] = attempted_at
+        x["brightdata_failure_reason"] = failure_reason
+        out.append(x)
+    return out
 
 
 def healthcheck(timeout: float = 10.0) -> dict[str, Any]:
     res = search_web("semiconductor news", max_results=1, timeout=timeout, news=True)
-    return {"available": bool(res.get("available")), "status": "READY" if res.get("available") else "UNAVAILABLE", "reason": res.get("reason"), "result_count": len(res.get("results", []))}
+    status = "READY" if res.get("available") else res.get("status", "DEGRADED")
+    return {"available": bool(res.get("available")), "status": status, "reason": res.get("reason"), "result_count": len(res.get("results", [])), "diagnostic": res.get("diagnostic")}
 
 
 def research_symbol(symbol: str) -> dict[str, Any]:

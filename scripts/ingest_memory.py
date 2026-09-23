@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from dotenv import load_dotenv
 
 from agent.memory.cognee_client import compact_research_summary
-from agent.tools.memory_tools import memory_healthcheck, recall_similar_setups, store_daily_research, store_strategy_lesson
+from agent.tools.memory_tools import memory_healthcheck, recall_similar_setups, remember_outcome, store_daily_research, store_strategy_lesson
 
 
 def _print_safe(obj: dict) -> None:
@@ -25,6 +25,10 @@ def main():
     p.add_argument("--recall", help="Recall/query Cognee memory")
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--health", action="store_true")
+    p.add_argument("--outcome", help="Outcome text for a prior brief/symbol")
+    p.add_argument("--brief-id", help="Brief id for --outcome")
+    p.add_argument("--symbol", help="Symbol for --outcome")
+    p.add_argument("--observed-at", help="Observation timestamp for --outcome")
     p.add_argument("--dry-run", action="store_true", help="Show compact memory summary without storing")
     args = p.parse_args()
     if args.health:
@@ -35,7 +39,12 @@ def main():
             _print_safe({"dry_run": True, "summary": compact_research_summary(obj)})
         else:
             res = store_daily_research(obj)
-            _print_safe({"status": "PASS" if res.get("stored") else "DEGRADED", "stored": res.get("stored", False), "brief_id": obj.get("brief_id"), "symbol": compact_research_summary(obj).get("symbol"), "reason": res.get("reason")})
+            _print_safe({"status": "PASS" if res.get("stored") else "DEGRADED", "stored": res.get("stored", False), "brief_id": obj.get("brief_id"), "symbol": compact_research_summary(obj).get("symbol"), "structured_memories": res.get("structured_memories"), "evidence_objects": res.get("evidence_objects"), "symbols": res.get("symbols"), "source_url_count": len(res.get("source_urls", []) or []), "reason": res.get("reason")})
+    elif args.outcome:
+        if not args.brief_id or not args.symbol:
+            raise SystemExit("--outcome requires --brief-id and --symbol")
+        res = remember_outcome(args.brief_id, args.symbol, args.outcome, lesson=args.lesson, observed_at=args.observed_at)
+        _print_safe({"status": "PASS" if res.get("stored") else "DEGRADED", "stored": res.get("stored", False), "brief_id": args.brief_id, "symbol": args.symbol, "reason": res.get("reason")})
     elif args.lesson:
         res = store_strategy_lesson(args.lesson)
         _print_safe({"status": "PASS" if res.get("stored") else "DEGRADED", "stored": res.get("stored", False), "reason": res.get("reason")})

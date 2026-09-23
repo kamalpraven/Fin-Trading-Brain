@@ -67,7 +67,7 @@ def test_no_fabricated_sources_from_malformed_brightdata(monkeypatch):
     monkeypatch.setenv("BRIGHTDATA_MCP_URL", "https://brightdata.test/search")
     monkeypatch.setattr(brightdata_tools.requests, "post", lambda *a, **k: Resp(payload={"results": [{"title": "No URL", "snippet": "x"}]}))
     out = brightdata_tools.search_web("MU")
-    assert out["available"]
+    assert out["available"] is False
     assert out["results"] == []
 
 

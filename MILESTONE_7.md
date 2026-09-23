@@ -43,7 +43,7 @@ Existing untracked `MILESTONE_6.md` was preserved and not overwritten.
 Full suite result:
 
 ```text
-54 passed
+85 passed
 ```
 
 Coverage added for:
@@ -58,6 +58,8 @@ Coverage added for:
 ## Cognee live status
 
 Status: **PASS**
+
+Optional knowledge-map addition: `scripts/visualize_cognee.py` reuses the hosted Cognee tenant/dataset and writes `results/cognee/fin_trading_brain_map.html` plus `results/cognee/fin_trading_brain_graph.json`. Cognee ingestion now writes structured production-tagged research memories for ResearchBrief, SymbolMemory, Regime, Evidence, Source URLs, hypotheses, and future Outcome/Lesson records. Visualization uses native hosted Cognee output when appropriate and falls back to local rendering of real Cognee graph data only when native HTML is unavailable or explicit test-junk filtering is needed.
 
 Validated external persistence flow:
 
@@ -122,7 +124,7 @@ python scripts/daily_research.py
 Latest artifact:
 
 ```text
-results/agent/daily_research_20260923_065907.json
+results/agent/daily_research_20260923_135746.json
 ```
 
 Pipeline completed without AWS/Bedrock/Strands and saved a structured JSON brief with required fields:
@@ -193,6 +195,32 @@ Therefore the previously reported Milestone 6 evaluation cannot currently be rep
 1. Produce real QuantConnect/LEAN V1 comparison artifacts.
 2. Refresh Alpha Lab market data if a newer `as_of` is required.
 3. Optionally refine evidence quality filters after more live Bright Data samples.
+
+## M7 FINAL STATUS
+
+- Alpha/risk engine: **READY**
+- QQQ regime: **READY**
+- Bright Data: **READY with graceful transient degradation handling**
+- Cognee persistence: **READY**
+- Cognee structured memory: **READY**
+- Cognee knowledge graph: **READY**
+- Daily research pipeline: **READY**
+- Preflight required result: **PASS**
+- `ALLOW_ORDERS=false`
+- AWS/Bedrock/Strands: **OUT OF SCOPE**
+- QuantConnect parity: **separate validation track**
+- Tests: **85 passed**
+- Latest graph: **263 nodes / 912 edges**
+- Latest live Bright Data test: **PASS, 5 results**
+- Latest daily research artifact: `results/agent/daily_research_20260923_135746.json`
+
+Bright Data freshness behavior:
+- Fresh live results are tagged as `fresh` and keep their own `retrieved_at` timestamps.
+- If Bright Data transiently fails and prior real evidence exists, daily research may use it only as `stale_fallback` with the original `retrieved_at`, current attempted time, and failure reason.
+- If no valid prior evidence exists, no fake evidence is produced.
+
+Known final limitation:
+- Bright Data provider can transiently return empty or malformed nested responses. This is handled via limited retry, safe diagnostics, explicit `DEGRADED` semantics, and fallback logic without silently treating stale evidence as fresh.
 
 ## Next step
 

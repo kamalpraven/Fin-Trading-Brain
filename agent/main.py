@@ -57,8 +57,10 @@ def _extract_symbol(query: str) -> str | None:
     return None
 
 
-def _external_evidence(query: str, symbols: list[str]) -> list[dict[str, Any]]:
+def _external_evidence(query: str, symbols: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     evidence = []
+    failures = []
+    attempted_at = datetime.now(timezone.utc).isoformat()
     if symbols:
         for sym in symbols[:3]:
             res = brightdata_tools.research_symbol(sym)
@@ -66,14 +68,23 @@ def _external_evidence(query: str, symbols: list[str]) -> list[dict[str, Any]]:
                 for item in res.get("results", []):
                     evidence.append({"symbol": sym, **item})
             else:
-                evidence.append({"symbol": sym, "available": False, "reason": res.get("reason")})
+                failures.append({"symbol": sym, "reason": res.get("reason"), "status": res.get("status", "DEGRADED")})
     else:
         res = brightdata_tools.get_recent_semiconductor_news()
         if res.get("available"):
             evidence.extend(res.get("results", []))
         else:
-            evidence.append({"available": False, "reason": res.get("reason")})
-    return evidence
+            failures.append({"reason": res.get("reason"), "status": res.get("status", "DEGRADED")})
+    if evidence:
+        brightdata_tools.save_last_good_evidence(evidence, query=query)
+        return evidence, {"brightdata_status": "READY", "brightdata_attempted_at": attempted_at, "brightdata_failure_reason": None, "evidence_freshness_summary": {"fresh": len(evidence), "stale_fallback": 0, "unknown": 0}}
+    reason = "; ".join(f.get("reason") or "unknown" for f in failures) or "Bright Data unavailable"
+    has_config_fail = any(f.get("status") == "FAIL" and "credentials not configured" in str(f.get("reason")) for f in failures)
+    if not has_config_fail:
+        stale = brightdata_tools.mark_stale_fallback(brightdata_tools.load_last_good_evidence(), attempted_at, reason)
+        if stale:
+            return stale, {"brightdata_status": "DEGRADED", "brightdata_attempted_at": attempted_at, "brightdata_failure_reason": reason, "evidence_freshness_summary": {"fresh": 0, "stale_fallback": len(stale), "unknown": 0}}
+    return [{"available": False, "reason": reason}], {"brightdata_status": "DEGRADED", "brightdata_attempted_at": attempted_at, "brightdata_failure_reason": reason, "evidence_freshness_summary": {"fresh": 0, "stale_fallback": 0, "unknown": 0}}
 
 
 def _memory_context(query: str, symbol: str | None) -> list[dict[str, Any]]:
@@ -166,7 +177,7 @@ def build_research_brief(query: str, agent: ResearchAgent | None = None) -> Rese
         "cost_sensitivity": alpha_tools.get_cost_sensitivity_summary(),
     }
     target_symbols = [symbol] if symbol else [r["symbol"] for r in rankings.get("symbols", [])[:3]]
-    evidence = _external_evidence(query, target_symbols)
+    evidence, brightdata_meta = _external_evidence(query, target_symbols)
     memory = _memory_context(query, symbol)
     actions = _candidate_actions(rankings, regime, symbol)
     top_symbols = [r.get("symbol") for r in rankings.get("symbols", [])[:5] if r.get("symbol")]
@@ -189,8 +200,8 @@ def build_research_brief(query: str, agent: ResearchAgent | None = None) -> Rese
         synthesis=synthesis,
         catalysts=catalysts,
         conflicts=conflicts,
-        data_freshness={"quant_data_as_of": quant_as_of, "quant_data_status": "historical/cached Alpha Lab data", "external_research_retrieved_at": max(external_retrieved) if external_retrieved else None, "external_research_status": "current live web retrieval when Bright Data available; otherwise unavailable", "memory_status": "prior research recalled from Cognee when available"},
-        limitations=["Research-only; no order execution tools exist", "Bright Data/Cognee may be unavailable if credentials are not configured", "Web evidence is not a direct trading signal", "Quant rankings are historical/cached unless data artifacts are refreshed"],
+        data_freshness={"quant_data_as_of": quant_as_of, "quant_data_status": "historical/cached Alpha Lab data", "external_research_retrieved_at": max(external_retrieved) if external_retrieved else None, "external_research_status": "current live web retrieval when Bright Data available; stale_fallback is explicitly labeled", "memory_status": "prior research recalled from Cognee when available", **brightdata_meta},
+        limitations=["Research-only; no order execution tools exist", "Bright Data/Cognee may be unavailable if credentials are not configured", "Web evidence is not a direct trading signal", "Quant rankings are historical/cached unless data artifacts are refreshed"] + (["Live Bright Data unavailable; using explicitly labeled stale fallback evidence" if brightdata_meta.get("evidence_freshness_summary", {}).get("stale_fallback") else "Live Bright Data unavailable; no external evidence included"] if brightdata_meta.get("brightdata_status") == "DEGRADED" else []),
         integration_status=agent.integration_status,
     )
     return brief
@@ -230,6 +241,11 @@ def run_research_agent(query: str, agent: ResearchAgent | None = None, persist: 
     obj["candidates"] = obj.get("quantitative_candidates", [])
     obj["recommendation_state"] = _daily_recommendation_state(obj.get("candidate_actions", []))
     obj["sources"] = _source_list(obj.get("external_evidence", []))
+    fresh = obj.get("data_freshness", {})
+    obj["brightdata_status"] = fresh.get("brightdata_status")
+    obj["brightdata_attempted_at"] = fresh.get("brightdata_attempted_at")
+    obj["brightdata_failure_reason"] = fresh.get("brightdata_failure_reason")
+    obj["evidence_freshness_summary"] = fresh.get("evidence_freshness_summary")
     obj["hypothesis"] = obj.get("synthesis", "")
     obj["outcome"] = "research_only_no_trades"
     obj["lessons"] = []

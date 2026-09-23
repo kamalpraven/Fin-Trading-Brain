@@ -21,5 +21,9 @@ def store_strategy_lesson(lesson: dict[str, Any] | str) -> dict[str, Any]:
     return CogneeClient().remember_strategy_lesson(lesson)
 
 
+def remember_outcome(brief_id: str, symbol: str, outcome: str, lesson: str | None = None, observed_at: str | None = None) -> dict[str, Any]:
+    return CogneeClient().remember_outcome_record(brief_id, symbol, outcome, lesson, observed_at)
+
+
 def memory_healthcheck() -> dict[str, Any]:
     return CogneeClient().healthcheck()
